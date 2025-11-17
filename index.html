@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-User Touch Test</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #111;
+            touch-action: none;
+            /* Prevent default touch behaviors */
+        }
+
+        #canvas {
+            display: block;
+            cursor: crosshair;
+        }
+
+        #log {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            color: #0f0;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+            border-top: 2px solid #0f0;
+        }
+
+        #status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #fff;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 14px;
+        }
+
+        .connected {
+            color: #0f0;
+        }
+
+        .disconnected {
+            color: #f00;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="status">
+        Status: <span id="connectionStatus" class="disconnected">Disconnected</span><br>
+        Active Users: <span id="userCount">0</span><br>
+        Your Color: <span id="yourColor"></span>
+    </div>
+    <div id="log">Log: Waiting for connection...</div>
+
+    <script>
+        // -------------------------
+        // Setup
+        // -------------------------
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d");
+        const logBox = document.getElementById("log");
+        const statusEl = document.getElementById("connectionStatus");
+        const userCountEl = document.getElementById("userCount");
+        const yourColorEl = document.getElementById("yourColor");
+
+        // Canvas resize handler
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener("resize", resize);
+
+        // Logging function with timestamp
+        function log(msg) {
+            const time = new Date().toLocaleTimeString();
+            logBox.innerHTML += `<br>[${time}] ${msg}`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // Generate unique client ID and color
+        const clientId = Math.random().toString(36).substr(2, 9);
+        const myColor = "#" + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
+        yourColorEl.style.color = myColor;
+        yourColorEl.textContent = myColor;
+
+        // Touch maps: local touches and remote touches by client
+        let localTouches = new Map();
+        let remoteTouches = new Map(); // Map<clientId, Array<touch objects>>
+
+        // -------------------------
+        // WebSocket Connection
+        // -------------------------
+        // Determine WebSocket URL based on current location
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}`;
+
+        let socket;
+        let reconnectInterval;
+
+        function connect() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                log("✓ Connected to server");
+                statusEl.textContent = "Connected";
+                statusEl.className = "connected";
+                clearInterval(reconnectInterval);
+                updateUserCount();
+            };
+
+            socket.onmessage = event => {
+                const data = JSON.parse(event.data);
+
+                // Received another user's touch update
+                if (data.type === "touchUpdate") {
+                    remoteTouches.set(data.clientId, {
+                        touches: data.touches,
+                        color: data.color
+                    });
+                    log(`👆 Update from user ${data.clientId.substr(0, 4)}: ${data.touches.length} touch(es)`);
+                    updateUserCount();
+                }
+
+                // Another user cleared all their touches
+                if (data.type === "clearTouches") {
+                    remoteTouches.delete(data.clientId);
+                    log(`👋 User ${data.clientId.substr(0, 4)} cleared touches`);
+                    updateUserCount();
+                }
+            };
+
+            socket.onclose = () => {
+                log("✗ Disconnected from server");
+                statusEl.textContent = "Disconnected";
+                statusEl.className = "disconnected";
+
+                // Attempt to reconnect every 3 seconds
+                reconnectInterval = setInterval(() => {
+                    log("⟳ Attempting to reconnect...");
+                    connect();
+                }, 3000);
+            };
+
+            socket.onerror = error => {
+                log("✗ WebSocket error");
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        // Initial connection
+        connect();
+
+        // Update active user count display
+        function updateUserCount() {
+            const count = remoteTouches.size + (localTouches.size > 0 ? 1 : 0);
+            userCountEl.textContent = count;
+        }
+
+        // -------------------------
+        // Send Touch Data to Server
+        // -------------------------
+        function sendTouchState() {
+            // Only send if connected
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: "touchUpdate",
+                    clientId: clientId,
+                    color: myColor,
+                    touches: Array.from(localTouches.values())
+                }));
+            }
+        }
+
+        function clearTouchState() {
+            // Only send if connected
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: "clearTouches",
+                    clientId: clientId
+                }));
+            }
+        }
+
+        // -------------------------
+        // Touch Event Handlers
+        // -------------------------
+        function updateLocalTouch(touch) {
+            localTouches.set(touch.identifier, {
+                id: touch.identifier,
+                x: touch.clientX,
+                y: touch.clientY,
+                color: myColor
+            });
+        }
+
+        // Touch start - new touch detected
+        canvas.addEventListener("touchstart", e => {
+            for (let t of e.changedTouches) {
+                updateLocalTouch(t);
+                log(`👇 Touch start: ID ${t.identifier} at (${Math.round(t.clientX)}, ${Math.round(t.clientY)})`);
+            }
+            sendTouchState();
+            updateUserCount();
+            e.preventDefault();
+        }, { passive: false });
+
+        // Touch move - touch position changed
+        canvas.addEventListener("touchmove", e => {
+            for (let t of e.changedTouches) {
+                updateLocalTouch(t);
+            }
+            sendTouchState();
+            e.preventDefault();
+        }, { passive: false });
+
+        // Touch end - touch lifted
+        canvas.addEventListener("touchend", e => {
+            for (let t of e.changedTouches) {
+                localTouches.delete(t.identifier);
+                log(`👆 Touch end: ID ${t.identifier}`);
+            }
+            sendTouchState();
+            if (localTouches.size === 0) {
+                clearTouchState();
+            }
+            updateUserCount();
+            e.preventDefault();
+        }, { passive: false });
+
+        // Touch cancel - touch interrupted
+        canvas.addEventListener("touchcancel", e => {
+            for (let t of e.changedTouches) {
+                localTouches.delete(t.identifier);
+                log(`⚠ Touch cancel: ID ${t.identifier}`);
+            }
+            sendTouchState();
+            if (localTouches.size === 0) {
+                clearTouchState();
+            }
+            updateUserCount();
+            e.preventDefault();
+        }, { passive: false });
+
+        // -------------------------
+        // Mouse Support (for testing on desktop)
+        // -------------------------
+        let mouseDown = false;
+        const MOUSE_ID = 'mouse';
+
+        canvas.addEventListener("mousedown", e => {
+            mouseDown = true;
+            localTouches.set(MOUSE_ID, {
+                id: MOUSE_ID,
+                x: e.clientX,
+                y: e.clientY,
+                color: myColor
+            });
+            sendTouchState();
+            updateUserCount();
+            log(`🖱 Mouse down at (${Math.round(e.clientX)}, ${Math.round(e.clientY)})`);
+        });
+
+        canvas.addEventListener("mousemove", e => {
+            if (mouseDown) {
+                localTouches.set(MOUSE_ID, {
+                    id: MOUSE_ID,
+                    x: e.clientX,
+                    y: e.clientY,
+                    color: myColor
+                });
+                sendTouchState();
+            }
+        });
+
+        canvas.addEventListener("mouseup", e => {
+            if (mouseDown) {
+                mouseDown = false;
+                localTouches.delete(MOUSE_ID);
+                sendTouchState();
+                if (localTouches.size === 0) {
+                    clearTouchState();
+                }
+                updateUserCount();
+                log(`🖱 Mouse up`);
+            }
+        });
+
+        canvas.addEventListener("mouseleave", e => {
+            if (mouseDown) {
+                mouseDown = false;
+                localTouches.delete(MOUSE_ID);
+                sendTouchState();
+                if (localTouches.size === 0) {
+                    clearTouchState();
+                }
+                updateUserCount();
+            }
+        });
+
+        // -------------------------
+        // Drawing Loop
+        // -------------------------
+        function draw() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw local touches (your own touches - larger circles)
+            localTouches.forEach(t => {
+                ctx.fillStyle = t.color;
+                ctx.beginPath();
+                ctx.arc(t.x, t.y, 35, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Add a white border to make it stand out
+                ctx.strokeStyle = "white";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+
+            // Draw remote touches (other users' touches - smaller circles)
+            remoteTouches.forEach((clientData, clientId) => {
+                clientData.touches.forEach(t => {
+                    ctx.fillStyle = clientData.color || "cyan";
+                    ctx.beginPath();
+                    ctx.arc(t.x, t.y, 25, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Add a subtle border
+                    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                });
+            });
+
+            requestAnimationFrame(draw);
+        }
+
+        // Start the drawing loop
+        draw();
+
+        log(`✓ Client initialized with ID: ${clientId}`);
+    </script>
+</body>
+
+</html>
